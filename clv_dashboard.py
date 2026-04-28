@@ -1803,11 +1803,23 @@ def cb_explorer(clv_seg, churn_seg, band, region):
 
 
 # ── Entry Point ───────────────────────────────────────────────────────────────
+def _running_in_streamlit():
+    try:
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+        return get_script_run_ctx() is not None
+    except Exception:
+        return False
+
+
 if __name__ == "__main__":
-    host = os.environ.get("HOST", "0.0.0.0")
-    port = int(os.environ.get("PORT", "8050"))
-    print("=" * 60)
-    print("  CLV Business Intelligence Dashboard")
-    print(f"  Open: http://localhost:{port}")
-    print("=" * 60)
-    app.run(debug=False, host=host, port=port)
+    if _running_in_streamlit():
+        from streamlit_app import render_app
+        render_app()
+    else:
+        host = os.environ.get("HOST", "0.0.0.0")
+        port = int(os.environ.get("PORT", "8050"))
+        print("=" * 60)
+        print("  CLV Business Intelligence Dashboard")
+        print(f"  Open: http://localhost:{port}")
+        print("=" * 60)
+        app.run(debug=False, host=host, port=port)
