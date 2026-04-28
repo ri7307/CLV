@@ -3,8 +3,8 @@ CLV Business Intelligence Dashboard
 ====================================
 Multi-page interactive Dash dashboard built from the CLV Analytics notebook.
 
-Run:  streamlit run streamlit_app.py
-Then open:  http://localhost:8501
+Run:  python clv_dashboard.py
+Then open:  http://localhost:8050
 
 Requirements:
     pip install dash dash-bootstrap-components plotly pandas numpy
@@ -54,18 +54,6 @@ LAYOUT_BASE = dict(
     xaxis=dict(gridcolor=GRID, zerolinecolor=GRID),
     yaxis=dict(gridcolor=GRID, zerolinecolor=GRID),
 )
-
-
-def apply_horizontal_bar_layout(fig, title):
-    """Prevent clipping of long category labels and outside value text."""
-    layout_kwargs = dict(LAYOUT_BASE)
-    layout_kwargs["title"] = title
-    layout_kwargs["margin"] = dict(l=130, r=130, t=75, b=55)
-    layout_kwargs["yaxis"] = dict(automargin=True, gridcolor=GRID, zerolinecolor=GRID)
-    layout_kwargs["xaxis"] = dict(automargin=True, gridcolor=GRID, zerolinecolor=GRID)
-    fig.update_layout(**layout_kwargs)
-    fig.update_traces(cliponaxis=False)
-    return fig
 
 # ── Data Loading & Preprocessing ─────────────────────────────────────────────
 def load_data():
@@ -127,16 +115,50 @@ def load_data():
         (df["churn_probability"].between(0, 1)) &
         (df["purchase_frequency"] >= 1) &
         (df["average_order_value"] > 0)
+    ].copy()
+
+    # Notebook-aligned targeted imputation for non-critical analytical fields.
+    median_cols = [
+        "recency_last_purchase_days", "cart_wishlist_activity", "age",
+        "discount_sensitivity", "unique_products_purchased",
     ]
+    for col in median_cols:
+        if col in df.columns:
+            df[col] = df[col].fillna(df[col].median())
+
+    cat_cols = [
+        "gender", "location_region", "income_level",
+        "acquisition_channel", "product_category_preference",
+    ]
+    for col in cat_cols:
+        if col in df.columns:
+            df[col] = df[col].fillna("Unknown")
     return df
 
 
 def engineer_features(df):
-    # CLV Segment
-    bins  = [0, 2000, 5000, df["Customer_Lifetime_Value"].max() + 1]
-    lbls  = ["Low Value", "Medium Value", "High Value"]
-    df["clv_segment"] = pd.cut(df["Customer_Lifetime_Value"],
-                               bins=bins, labels=lbls, include_lowest=True).astype(str)
+    df = df.copy()
+
+    # CLV Segment: primary notebook pipeline uses 33rd/66th percentile thresholds.
+    lbls = ["Low Value", "Medium Value", "High Value"]
+    try:
+        df["clv_segment"] = pd.qcut(
+            df["Customer_Lifetime_Value"], q=[0, 0.33, 0.66, 1],
+            labels=lbls, duplicates="drop",
+        ).astype(str)
+    except ValueError:
+        bins = [0, 2000, 5000, df["Customer_Lifetime_Value"].max() + 1]
+        df["clv_segment"] = pd.cut(
+            df["Customer_Lifetime_Value"], bins=bins,
+            labels=lbls, include_lowest=True,
+        ).astype(str)
+
+    # Keep the fixed notebook chart thresholds available as a separate lens.
+    fixed_bins = [0, 2000, 5000, df["Customer_Lifetime_Value"].max() + 1]
+    df["clv_fixed_segment"] = pd.cut(
+        df["Customer_Lifetime_Value"], bins=fixed_bins,
+        labels=lbls, include_lowest=True,
+    ).astype(str)
 
     # Churn Risk
     df["churn_risk"] = pd.cut(df["churn_probability"],
@@ -153,16 +175,61 @@ def engineer_features(df):
 
     # Normalised engagement
     mn, mx = df["engagement_score"].min(), df["engagement_score"].max()
-    df["engagement_score_normalized"] = (
-        (df["engagement_score"] - mn) / (mx - mn) * 100
+    if mx == mn:
+        df["engagement_score_normalized"] = 50
+    else:
+        df["engagement_score_normalized"] = (
+            (df["engagement_score"] - mn) / (mx - mn) * 100
+        ).round(2)
+
+    # Notebook formula: service priority balances CLV, engagement, and retained probability.
+    df["priority_score"] = (
+        df["Customer_Lifetime_Value"] *
+        df["engagement_score_normalized"] *
+        (1 - df["churn_probability"]) / 1000
+    ).round(3)
+
+    # Retention urgency is intentionally separate: it highlights value currently at risk.
+    df["retention_urgency_score"] = (
+        df["Customer_Lifetime_Value"] *
+        df["churn_probability"] *
+        (1 + (100 - df["engagement_score_normalized"]) / 100)
     ).round(2)
 
-    # Priority Score
-    df["priority_score"] = (
-        df["Customer_Lifetime_Value"] / df["Customer_Lifetime_Value"].max() * 0.5 +
-        df["churn_probability"] * 0.3 +
-        df["engagement_score_normalized"] / 100 * 0.2
-    ).round(4)
+    df["expected_clv_at_risk"] = (
+        df["Customer_Lifetime_Value"] * df["churn_probability"]
+    ).round(2)
+    df["est_refund_revenue_at_risk"] = (
+        df["total_revenue_generated"] * df["return_refund_rate"]
+    ).round(2)
+
+    df["discount_tier"] = pd.cut(
+        df["discount_sensitivity"],
+        bins=[-0.01, 0.33, 0.66, 1.01],
+        labels=["Low Sensitivity", "Medium Sensitivity", "High Sensitivity"],
+        include_lowest=True,
+    ).astype(str)
+
+    df["recency_tier"] = pd.cut(
+        df["recency_last_purchase_days"],
+        bins=[-0.01, 30, 90, np.inf],
+        labels=["Active (<=30 days)", "Drifting (31-90 days)", "Dormant (>90 days)"],
+        include_lowest=True,
+    ).astype(str)
+
+    df["product_breadth"] = pd.cut(
+        df["unique_products_purchased"],
+        bins=[-0.01, 3, 7, np.inf],
+        labels=["Low Breadth (1-3)", "Medium Breadth (4-7)", "High Breadth (8+)"],
+        include_lowest=True,
+    ).astype(str)
+
+    df["loyalty_label"] = df["loyalty_program_membership"].map(
+        {0: "Non-Member", 1: "Member"}
+    ).fillna("Unknown")
+    df["subscription_label"] = df["subscription_purchase_behavior"].map(
+        {0: "No Subscription", 1: "Subscription Buyer"}
+    ).fillna("Unknown")
 
     return df
 
@@ -174,9 +241,15 @@ df     = engineer_features(raw_df)
 ALL_CHANNELS = sorted(df["acquisition_channel"].dropna().unique().tolist())
 ALL_REGIONS  = sorted(df["location_region"].dropna().unique().tolist())
 ALL_PRODUCTS = sorted(df["product_category_preference"].dropna().unique().tolist())
+SEGMENT_ORDER = ["High Value", "Medium Value", "Low Value"]
+RISK_ORDER = ["High Risk", "Medium Risk", "Low Risk"]
+REVENUE_ORDER = ["Platinum", "Gold", "Silver", "Bronze"]
+RECENCY_ORDER = ["Active (<=30 days)", "Drifting (31-90 days)", "Dormant (>90 days)"]
+DISCOUNT_ORDER = ["Low Sensitivity", "Medium Sensitivity", "High Sensitivity"]
+BREADTH_ORDER = ["Low Breadth (1-3)", "Medium Breadth (4-7)", "High Breadth (8+)"]
 
 # ── App Setup ─────────────────────────────────────────────────────────────────
-dash_app = dash.Dash(
+app = dash.Dash(
     __name__,
     external_stylesheets=[
         dbc.themes.CYBORG,
@@ -185,7 +258,7 @@ dash_app = dash.Dash(
     suppress_callback_exceptions=True,
     title="CLV Intelligence Dashboard",
 )
-server = dash_app.server  # expose Flask server for deployment (Gunicorn / Render / etc.)
+server = app.server  # expose Flask server for deployment (Gunicorn / Render / etc.)
 
 # ── Reusable style helpers ─────────────────────────────────────────────────────
 def card(children, style=None, className=""):
@@ -242,6 +315,57 @@ def section_title(text):
                                 "marginBottom": "4px", "letterSpacing": "-0.01em"})
 
 
+def empty_figure(title="No data for selected filters"):
+    fig = go.Figure()
+    fig.add_annotation(
+        text=title, x=0.5, y=0.5, showarrow=False,
+        font=dict(color=MUTED, size=16),
+    )
+    fig.update_layout(**LAYOUT_BASE)
+    fig.update_xaxes(visible=False)
+    fig.update_yaxes(visible=False)
+    return fig
+
+
+def filter_dataset(source, clv="All", churn="All", channel="All", region="All",
+                   product="All", income="All"):
+    d = source.copy()
+    if clv != "All":
+        d = d[d["clv_segment"] == clv]
+    if churn != "All":
+        d = d[d["churn_risk"] == churn]
+    if channel != "All":
+        d = d[d["acquisition_channel"] == channel]
+    if region != "All":
+        d = d[d["location_region"] == region]
+    if product != "All":
+        d = d[d["product_category_preference"] == product]
+    if income != "All":
+        d = d[d["income_level"] == income]
+    return d
+
+
+def metric_note(title, value, detail, color=BLUE):
+    return html.Div(
+        [
+            html.Div(title, style={"color": MUTED, "fontSize": "0.72rem",
+                                   "fontWeight": "600", "textTransform": "uppercase"}),
+            html.Div(value, style={"color": color, "fontSize": "1.25rem",
+                                   "fontWeight": "700", "marginTop": "4px"}),
+            html.Div(detail, style={"color": "#cbd5e1", "fontSize": "0.78rem",
+                                    "lineHeight": "1.35", "marginTop": "5px"}),
+        ],
+        style={
+            "background": SURFACE2,
+            "border": f"1px solid {color}33",
+            "borderRadius": "8px",
+            "padding": "14px 16px",
+            "flex": "1",
+            "minWidth": "210px",
+        },
+    )
+
+
 # ── Sidebar & Navigation ──────────────────────────────────────────────────────
 NAV_ITEMS = [
     ("🏠", "Executive Overview",       "/"),
@@ -250,6 +374,7 @@ NAV_ITEMS = [
     ("🛒", "Product & Category",       "/product"),
     ("🌍", "Regional & Demographics",  "/regional"),
     ("⭐", "Engagement & Loyalty",     "/engagement"),
+    ("☁️", "Big Data Risk Lab",        "/risk-lab"),
     ("📋", "Data Explorer",            "/explorer"),
 ]
 
@@ -330,7 +455,7 @@ def sidebar():
 
 
 # ── Main Layout ───────────────────────────────────────────────────────────────
-dash_app.layout = html.Div(
+app.layout = html.Div(
     [
         dcc.Location(id="url", refresh=False),
         html.Div(
@@ -354,7 +479,7 @@ dash_app.layout = html.Div(
 )
 
 # ── CUSTOM CSS ────────────────────────────────────────────────────────────────
-dash_app.index_string = '''
+app.index_string = '''
 <!DOCTYPE html>
 <html>
 <head>
@@ -628,7 +753,7 @@ def page_churn():
                      style={"color": RED, "fontWeight": "700", "marginBottom": "12px",
                             "fontSize": "1rem"}),
             html.Div(id="churn-table"),
-            insight_box("Sort by Priority Score to determine intervention order. "
+            insight_box("Sort by Retention Urgency Score to determine intervention order. "
                         "High satisfaction scores in this list indicate the customer can still "
                         "be saved — a targeted offer within 48 hours significantly reduces churn."),
         ]),
@@ -659,27 +784,32 @@ def page_product():
         ], style={"display": "flex", "gap": "16px", "flexWrap": "wrap",
                   "marginBottom": "20px"}),
 
+        html.Div(id="prod-summary", style={"display": "flex", "gap": "12px",
+                                            "flexWrap": "wrap", "marginBottom": "20px"}),
+
         html.Div([
             html.Div([
                 card([
                     html.Div("Avg CLV by Product Category",
                              style={"color": ACCENT, "fontWeight": "600", "marginBottom": "4px"}),
-                    dcc.Graph(id="prod-clv-bar", config={"displayModeBar": False}),
+                    dcc.Graph(id="prod-clv-bar", config={"displayModeBar": False},
+                              style={"height": "430px"}),
                     insight_box("Categories with the highest CLV should receive premium "
                                 "shelf placement, targeted loyalty rewards, and early-access "
                                 "promotions to deepen the customer's category affinity."),
                 ])
-            ], style={"flex": "1", "minWidth": "300px"}),
+            ], style={"flex": "1", "minWidth": "420px"}),
             html.Div([
                 card([
                     html.Div("Avg Revenue by Product Category",
                              style={"color": ACCENT, "fontWeight": "600", "marginBottom": "4px"}),
-                    dcc.Graph(id="prod-rev-bar", config={"displayModeBar": False}),
+                    dcc.Graph(id="prod-rev-bar", config={"displayModeBar": False},
+                              style={"height": "430px"}),
                     insight_box("Gap between CLV rank and Revenue rank in the same category "
                                 "reveals undermonetised relationships — strong signals for "
                                 "bundle offers and upsell campaigns."),
                 ])
-            ], style={"flex": "1", "minWidth": "300px"}),
+            ], style={"flex": "1", "minWidth": "420px"}),
         ], style={"display": "flex", "gap": "20px", "flexWrap": "wrap",
                   "marginBottom": "20px"}),
 
@@ -812,7 +942,147 @@ def page_engagement():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  PAGE 7 — Data Explorer
+#  PAGE 7 — Big Data Risk Lab
+# ─────────────────────────────────────────────────────────────────────────────
+def page_risk_lab():
+    return html.Div([
+        section_title("☁️ Big Data Risk Lab"),
+        html.P("Notebook-backed operational lab for RFM recency, discount sensitivity, "
+               "product breadth, return/refund risk, and Spark-style pipeline monitoring.",
+               style={"color": MUTED, "marginBottom": "20px", "fontSize": "0.88rem"}),
+
+        html.Div([
+            html.Div([
+                html.Label("CLV Segment", style={"color": MUTED, "fontSize": "0.75rem"}),
+                dcc.Dropdown(
+                    id="risk-clv",
+                    options=[{"label": x, "value": x}
+                             for x in ["All", "High Value", "Medium Value", "Low Value"]],
+                    value="All", clearable=False, style={"background": SURFACE},
+                ),
+            ], style={"flex": "1"}),
+            html.Div([
+                html.Label("Churn Risk", style={"color": MUTED, "fontSize": "0.75rem"}),
+                dcc.Dropdown(
+                    id="risk-churn",
+                    options=[{"label": x, "value": x}
+                             for x in ["All", "High Risk", "Medium Risk", "Low Risk"]],
+                    value="All", clearable=False, style={"background": SURFACE},
+                ),
+            ], style={"flex": "1"}),
+            html.Div([
+                html.Label("Channel", style={"color": MUTED, "fontSize": "0.75rem"}),
+                dcc.Dropdown(
+                    id="risk-channel",
+                    options=[{"label": "All", "value": "All"}] +
+                            [{"label": x, "value": x} for x in ALL_CHANNELS],
+                    value="All", clearable=False, style={"background": SURFACE},
+                ),
+            ], style={"flex": "1"}),
+            html.Div([
+                html.Label("Region", style={"color": MUTED, "fontSize": "0.75rem"}),
+                dcc.Dropdown(
+                    id="risk-region",
+                    options=[{"label": "All", "value": "All"}] +
+                            [{"label": x, "value": x} for x in ALL_REGIONS],
+                    value="All", clearable=False, style={"background": SURFACE},
+                ),
+            ], style={"flex": "1"}),
+            html.Div([
+                html.Label("Business Lens", style={"color": MUTED, "fontSize": "0.75rem"}),
+                dcc.Dropdown(
+                    id="risk-lens",
+                    options=[
+                        {"label": "Recency Tier", "value": "recency_tier"},
+                        {"label": "Discount Sensitivity", "value": "discount_tier"},
+                        {"label": "Product Breadth", "value": "product_breadth"},
+                        {"label": "Revenue Band", "value": "revenue_band"},
+                        {"label": "Acquisition Channel", "value": "acquisition_channel"},
+                    ],
+                    value="recency_tier", clearable=False, style={"background": SURFACE},
+                ),
+            ], style={"flex": "1"}),
+        ], style={"display": "flex", "gap": "16px", "flexWrap": "wrap",
+                  "marginBottom": "20px"}),
+
+        html.Div(id="risk-kpis", style={"display": "flex", "gap": "12px",
+                                         "flexWrap": "wrap", "marginBottom": "20px"}),
+
+        html.Div([
+            html.Div([
+                card([
+                    html.Div("RFM Recency × CLV Segment Heatmap",
+                             style={"color": ACCENT, "fontWeight": "600", "marginBottom": "4px"}),
+                    dcc.Graph(id="risk-rfm-heat", config={"displayModeBar": False}),
+                    insight_box("Dormant High Value customers are the notebook's clearest "
+                                "win-back opportunity: they have proven value, but recency shows "
+                                "relationship decay before churn fully materialises."),
+                ])
+            ], style={"flex": "1", "minWidth": "340px"}),
+            html.Div([
+                card([
+                    html.Div("Return/Refund Revenue-at-Risk Matrix",
+                             style={"color": ACCENT, "fontWeight": "600", "marginBottom": "4px"}),
+                    dcc.Graph(id="risk-return-heat", config={"displayModeBar": False}),
+                    insight_box("High return/refund exposure inside High Value or High Risk cells "
+                                "points to product-fit and service issues. Fixing those issues "
+                                "protects revenue and reduces avoidable support cost."),
+                ])
+            ], style={"flex": "1", "minWidth": "340px"}),
+        ], style={"display": "flex", "gap": "20px", "flexWrap": "wrap",
+                  "marginBottom": "20px"}),
+
+        html.Div([
+            html.Div([
+                card([
+                    html.Div("Discount Sensitivity: CLV vs Return Rate",
+                             style={"color": ACCENT, "fontWeight": "600", "marginBottom": "4px"}),
+                    dcc.Graph(id="risk-discount", config={"displayModeBar": False}),
+                    insight_box("If high-discount customers show lower CLV or higher return rates, "
+                                "promotion spend is attracting margin-diluting buyers. Shift offers "
+                                "toward loyalty perks and bundles for low-sensitivity customers."),
+                ])
+            ], style={"flex": "1", "minWidth": "340px"}),
+            html.Div([
+                card([
+                    html.Div("Product Breadth Loyalty Profile",
+                             style={"color": ACCENT, "fontWeight": "600", "marginBottom": "4px"}),
+                    dcc.Graph(id="risk-breadth", config={"displayModeBar": False}),
+                    insight_box("Customers buying across more categories are stickier and more "
+                                "valuable. Medium breadth customers are ideal cross-sell targets "
+                                "because they already show ecosystem adoption."),
+                ])
+            ], style={"flex": "1", "minWidth": "340px"}),
+        ], style={"display": "flex", "gap": "20px", "flexWrap": "wrap",
+                  "marginBottom": "20px"}),
+
+        html.Div([
+            html.Div([
+                card([
+                    html.Div("Selected Business Lens: Volume, CLV, Churn",
+                             style={"color": ACCENT, "fontWeight": "600", "marginBottom": "4px"}),
+                    dcc.Graph(id="risk-lens-chart", config={"displayModeBar": False}),
+                    insight_box("Use the lens selector to switch the same filtered data between "
+                                "recency, discount, breadth, revenue, and acquisition views. This "
+                                "turns the notebook aggregations into an interactive decision tool."),
+                ])
+            ], style={"flex": "1", "minWidth": "340px"}),
+            html.Div([
+                card([
+                    html.Div("Spark / Cloud Analytics Pipeline",
+                             style={"color": ACCENT, "fontWeight": "600", "marginBottom": "4px"}),
+                    dcc.Graph(id="risk-pipeline", config={"displayModeBar": False}),
+                    insight_box("This mirrors the notebook flow: ingest CSV, clean and impute, "
+                                "engineer CLV/risk features, aggregate at business dimensions, "
+                                "then serve the interactive dashboard for decision teams."),
+                ])
+            ], style={"flex": "1", "minWidth": "340px"}),
+        ], style={"display": "flex", "gap": "20px", "flexWrap": "wrap"}),
+    ])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  PAGE 8 — Data Explorer
 # ─────────────────────────────────────────────────────────────────────────────
 def page_explorer():
     return html.Div([
@@ -867,7 +1137,7 @@ def page_explorer():
 
 
 # ── Page Router ───────────────────────────────────────────────────────────────
-@dash_app.callback(Output("page-content", "children"), Input("url", "pathname"))
+@app.callback(Output("page-content", "children"), Input("url", "pathname"))
 def render_page(path):
     routes = {
         "/":           page_overview,
@@ -876,6 +1146,7 @@ def render_page(path):
         "/product":    page_product,
         "/regional":   page_regional,
         "/engagement": page_engagement,
+        "/risk-lab":    page_risk_lab,
         "/explorer":   page_explorer,
     }
     fn = routes.get(path, page_overview)
@@ -885,7 +1156,7 @@ def render_page(path):
 # ═════════════════════════════════════════════════════════════════════════════
 #  CALLBACKS — Executive Overview
 # ═════════════════════════════════════════════════════════════════════════════
-@dash_app.callback(
+@app.callback(
     Output("ov-kpis", "children"),
     Output("ov-pie", "figure"),
     Output("ov-churn-bar", "figure"),
@@ -896,12 +1167,9 @@ def render_page(path):
     Input("ov-channel", "value"),
 )
 def cb_overview(clv_seg, churn_seg, channel):
-    d = df.copy()
-    if clv_seg   != "All": d = d[d["clv_segment"]         == clv_seg]
-    if churn_seg != "All": d = d[d["churn_risk"]           == churn_seg]
-    if channel   != "All": d = d[d["acquisition_channel"]  == channel]
+    d = filter_dataset(df, clv=clv_seg, churn=churn_seg, channel=channel)
     if d.empty:
-        empty = go.Figure().update_layout(**LAYOUT_BASE)
+        empty = empty_figure()
         return [], empty, empty, empty, empty
 
     # KPI cards
@@ -957,10 +1225,15 @@ def cb_overview(clv_seg, churn_seg, channel):
         sample, x="churn_probability", y="Customer_Lifetime_Value",
         color="clv_segment",
         color_discrete_map=seg_colour,
-        opacity=0.55, size_max=8,
+        size="engagement_score_normalized",
+        opacity=0.55, size_max=11,
         labels={"churn_probability": "Churn Probability",
                 "Customer_Lifetime_Value": "CLV (₹)"},
     )
+    scatter.add_vrect(x0=0.65, x1=1.0, fillcolor=RED, opacity=0.08,
+                      line_width=0, annotation_text="Danger Zone",
+                      annotation_position="top left",
+                      annotation_font_color=RED)
     scatter.update_layout(title="CLV vs Churn Probability", **LAYOUT_BASE)
 
     return kpis, pie, churn_bar, rev_donut, scatter
@@ -969,7 +1242,7 @@ def cb_overview(clv_seg, churn_seg, channel):
 # ═════════════════════════════════════════════════════════════════════════════
 #  CALLBACKS — Channel & Revenue
 # ═════════════════════════════════════════════════════════════════════════════
-@dash_app.callback(
+@app.callback(
     Output("ch-bar", "figure"),
     Output("ch-stacked", "figure"),
     Output("ch-bubble", "figure"),
@@ -987,7 +1260,7 @@ def cb_channel(clv_seg, churn_seg):
         marker_color=BLUE,
         text=ch_agg.values.round(0), texttemplate="₹%{text:,.0f}", textposition="outside",
     ))
-    bar = apply_horizontal_bar_layout(bar, "Avg CLV by Channel")
+    bar.update_layout(title="Avg CLV by Channel", **LAYOUT_BASE)
 
     # Stacked bar: revenue band per channel
     stk = d.groupby(["acquisition_channel", "revenue_band"]).size().unstack(fill_value=0)
@@ -1024,7 +1297,7 @@ def cb_channel(clv_seg, churn_seg):
 # ═════════════════════════════════════════════════════════════════════════════
 #  CALLBACKS — Churn & Retention
 # ═════════════════════════════════════════════════════════════════════════════
-@dash_app.callback(
+@app.callback(
     Output("churn-violin", "figure"),
     Output("churn-heat", "figure"),
     Output("churn-table", "children"),
@@ -1060,9 +1333,9 @@ def cb_churn(n):
     danger = df[(df["clv_segment"] == "High Value") & (df["churn_risk"] == "High Risk")].copy()
     cols   = ["Customer_Lifetime_Value", "churn_probability", "engagement_score_normalized",
               "customer_satisfaction_score", "acquisition_channel",
-              "location_region", "priority_score"]
+              "location_region", "retention_urgency_score", "priority_score"]
     cols   = [c for c in cols if c in danger.columns]
-    danger = danger[cols].sort_values("priority_score", ascending=False).head(n).round(3)
+    danger = danger[cols].sort_values("retention_urgency_score", ascending=False).head(n).round(3)
     danger.columns = [c.replace("_", " ").title() for c in danger.columns]
 
     table = dash_table.DataTable(
@@ -1084,7 +1357,8 @@ def cb_churn(n):
 # ═════════════════════════════════════════════════════════════════════════════
 #  CALLBACKS — Product & Category
 # ═════════════════════════════════════════════════════════════════════════════
-@dash_app.callback(
+@app.callback(
+    Output("prod-summary", "children"),
     Output("prod-clv-bar", "figure"),
     Output("prod-rev-bar", "figure"),
     Output("prod-scatter", "figure"),
@@ -1100,24 +1374,80 @@ def cb_product(income):
         avg_rev=("total_revenue_generated", "mean"),
         avg_disc=("discount_sensitivity", "mean"),
         avg_repeat=("repeat_purchase_rate", "mean"),
-    ).reset_index().sort_values("avg_clv", ascending=True)
+        avg_return=("return_refund_rate", "mean"),
+        avg_churn=("churn_probability", "mean"),
+        customers=("Customer_Lifetime_Value", "count"),
+    ).reset_index()
+
+    if cat_agg.empty:
+        empty = empty_figure()
+        return [], empty, empty, empty
+
+    clv_top = cat_agg.loc[cat_agg["avg_clv"].idxmax()]
+    rev_top = cat_agg.loc[cat_agg["avg_rev"].idxmax()]
+    loyal_top = cat_agg.loc[cat_agg["avg_repeat"].idxmax()]
+    low_return = cat_agg.loc[cat_agg["avg_return"].idxmin()]
+    summary = [
+        metric_note("Top CLV Category", clv_top["product_category_preference"],
+                    f"Avg CLV ₹{clv_top['avg_clv']:,.0f} across {clv_top['customers']:,.0f} customers.",
+                    BLUE),
+        metric_note("Revenue Leader", rev_top["product_category_preference"],
+                    f"Avg revenue ₹{rev_top['avg_rev']:,.0f}; useful for near-term sales focus.",
+                    GREEN),
+        metric_note("Highest Repeat Rate", loyal_top["product_category_preference"],
+                    f"Repeat purchase rate {loyal_top['avg_repeat']:.1%}; strong loyalty signal.",
+                    YELLOW),
+        metric_note("Lowest Return Rate", low_return["product_category_preference"],
+                    f"Return/refund rate {low_return['avg_return']:.1%}; lower operational leakage.",
+                    PURPLE),
+    ]
+
+    cat_clv = cat_agg.sort_values("avg_clv", ascending=True).copy()
+    cat_clv["label"] = cat_clv["avg_clv"].map(lambda v: f"₹{v:,.0f}")
 
     clv_bar = go.Figure(go.Bar(
-        x=cat_agg["avg_clv"], y=cat_agg["product_category_preference"],
-        orientation="h", marker_color=BLUE,
-        text=cat_agg["avg_clv"].round(0),
-        texttemplate="₹%{text:,.0f}", textposition="outside",
+        x=cat_clv["avg_clv"], y=cat_clv["product_category_preference"],
+        orientation="h",
+        marker=dict(color=cat_clv["avg_clv"], colorscale="Blues", showscale=False,
+                    line=dict(color=ACCENT, width=1)),
+        text=cat_clv["label"],
+        textposition="outside",
+        cliponaxis=False,
+        hovertemplate="<b>%{y}</b><br>Avg CLV: ₹%{x:,.0f}<extra></extra>",
     ))
-    clv_bar = apply_horizontal_bar_layout(clv_bar, "Avg CLV by Product Category")
+    clv_bar.update_layout(title="Avg CLV by Product Category", **LAYOUT_BASE)
+    clv_bar.update_layout(
+        height=430,
+        margin=dict(l=155, r=110, t=70, b=55),
+        xaxis=dict(gridcolor=GRID, title="Average CLV (₹)",
+                   range=[0, cat_clv["avg_clv"].max() * 1.22]),
+        yaxis=dict(gridcolor=GRID, title="", automargin=True),
+        uniformtext_minsize=11,
+        uniformtext_mode="show",
+    )
 
-    cat_rev = cat_agg.sort_values("avg_rev", ascending=True)
+    cat_rev = cat_agg.sort_values("avg_rev", ascending=True).copy()
+    cat_rev["label"] = cat_rev["avg_rev"].map(lambda v: f"₹{v:,.0f}")
     rev_bar = go.Figure(go.Bar(
         x=cat_rev["avg_rev"], y=cat_rev["product_category_preference"],
-        orientation="h", marker_color=GREEN,
-        text=cat_rev["avg_rev"].round(0),
-        texttemplate="₹%{text:,.0f}", textposition="outside",
+        orientation="h",
+        marker=dict(color=cat_rev["avg_rev"], colorscale="Greens", showscale=False,
+                    line=dict(color="#86efac", width=1)),
+        text=cat_rev["label"],
+        textposition="outside",
+        cliponaxis=False,
+        hovertemplate="<b>%{y}</b><br>Avg Revenue: ₹%{x:,.0f}<extra></extra>",
     ))
-    rev_bar = apply_horizontal_bar_layout(rev_bar, "Avg Revenue by Product Category")
+    rev_bar.update_layout(title="Avg Revenue by Product Category", **LAYOUT_BASE)
+    rev_bar.update_layout(
+        height=430,
+        margin=dict(l=155, r=110, t=70, b=55),
+        xaxis=dict(gridcolor=GRID, title="Average Revenue (₹)",
+                   range=[0, cat_rev["avg_rev"].max() * 1.24]),
+        yaxis=dict(gridcolor=GRID, title="", automargin=True),
+        uniformtext_minsize=11,
+        uniformtext_mode="show",
+    )
 
     scatter = px.scatter(
         cat_agg, x="avg_disc", y="avg_repeat",
@@ -1132,13 +1462,13 @@ def cb_product(income):
     scatter.update_layout(title="Discount Sensitivity vs Repeat Rate by Category",
                           **LAYOUT_BASE, showlegend=False)
 
-    return clv_bar, rev_bar, scatter
+    return summary, clv_bar, rev_bar, scatter
 
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  CALLBACKS — Regional & Demographics
 # ═════════════════════════════════════════════════════════════════════════════
-@dash_app.callback(
+@app.callback(
     Output("reg-dual", "figure"),
     Output("reg-box", "figure"),
     Output("reg-gender", "figure"),
@@ -1199,7 +1529,7 @@ def cb_regional(path):
 # ═════════════════════════════════════════════════════════════════════════════
 #  CALLBACKS — Engagement & Loyalty
 # ═════════════════════════════════════════════════════════════════════════════
-@dash_app.callback(
+@app.callback(
     Output("eng-hist", "figure"),
     Output("eng-scatter", "figure"),
     Output("eng-loyalty", "figure"),
@@ -1258,16 +1588,171 @@ def cb_engagement(path):
         labels={"avg_tickets": "Avg Support Tickets", "clv_segment": "CLV Segment"},
     )
     support_fig.update_layout(title="Avg Support Tickets by CLV Segment",
-                              **LAYOUT_BASE,
-                              showlegend=False)
+                              **LAYOUT_BASE, showlegend=False)
 
     return hist, scatter, loyalty_fig, support_fig
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+#  CALLBACKS — Big Data Risk Lab
+# ═════════════════════════════════════════════════════════════════════════════
+@app.callback(
+    Output("risk-kpis", "children"),
+    Output("risk-rfm-heat", "figure"),
+    Output("risk-return-heat", "figure"),
+    Output("risk-discount", "figure"),
+    Output("risk-breadth", "figure"),
+    Output("risk-lens-chart", "figure"),
+    Output("risk-pipeline", "figure"),
+    Input("risk-clv", "value"),
+    Input("risk-churn", "value"),
+    Input("risk-channel", "value"),
+    Input("risk-region", "value"),
+    Input("risk-lens", "value"),
+)
+def cb_risk_lab(clv_seg, churn_seg, channel, region, lens):
+    d = filter_dataset(df, clv=clv_seg, churn=churn_seg,
+                       channel=channel, region=region)
+    if d.empty:
+        empty = empty_figure()
+        return [], empty, empty, empty, empty, empty, empty
+
+    high_risk = d[d["churn_risk"] == "High Risk"]
+    danger = d[(d["clv_segment"] == "High Value") & (d["churn_risk"] == "High Risk")]
+    dormant_hv = d[(d["clv_segment"] == "High Value") &
+                   (d["recency_tier"] == "Dormant (>90 days)")]
+    refund_risk = d["est_refund_revenue_at_risk"].sum()
+    at_risk_clv = high_risk["expected_clv_at_risk"].sum()
+
+    kpis = [
+        metric_note("Filtered Cohort", f"{len(d):,}",
+                    "Rows currently powering every chart on this page.", BLUE),
+        metric_note("Expected CLV at Risk", f"₹{at_risk_clv:,.0f}",
+                    "Sum of CLV x churn probability for high-risk customers.", RED),
+        metric_note("Danger Zone Value", f"₹{danger['Customer_Lifetime_Value'].sum():,.0f}",
+                    "Total CLV in the High Value x High Risk retention queue.", YELLOW),
+        metric_note("Dormant High Value", f"{len(dormant_hv):,}",
+                    "Win-back candidates with strong lifetime value and weak recency.", PURPLE),
+        metric_note("Refund Exposure", f"₹{refund_risk:,.0f}",
+                    "Estimated operational leakage from revenue x return/refund rate.", CYAN),
+    ]
+
+    rfm = d.pivot_table(
+        index="recency_tier", columns="clv_segment",
+        values="Customer_Lifetime_Value", aggfunc="count",
+    ).reindex(index=RECENCY_ORDER, columns=SEGMENT_ORDER, fill_value=0).fillna(0)
+    rfm_heat = go.Figure(go.Heatmap(
+        z=rfm.values, x=rfm.columns.tolist(), y=rfm.index.tolist(),
+        colorscale="Blues", text=rfm.values.astype(int),
+        texttemplate="%{text:,}",
+        hovertemplate="Recency: %{y}<br>CLV Segment: %{x}<br>Customers: %{z:,}<extra></extra>",
+    ))
+    rfm_heat.update_layout(title="Customer Count by Recency and CLV Segment", **LAYOUT_BASE)
+
+    refund = d.pivot_table(
+        index="clv_segment", columns="churn_risk",
+        values="est_refund_revenue_at_risk", aggfunc="mean",
+    ).reindex(index=SEGMENT_ORDER, columns=RISK_ORDER, fill_value=0).fillna(0)
+    return_heat = go.Figure(go.Heatmap(
+        z=refund.values, x=refund.columns.tolist(), y=refund.index.tolist(),
+        colorscale="Reds", text=np.round(refund.values, 1),
+        texttemplate="₹%{text:,.1f}",
+        hovertemplate="Segment: %{y}<br>Risk: %{x}<br>Avg Refund Exposure: ₹%{z:,.2f}<extra></extra>",
+    ))
+    return_heat.update_layout(title="Avg Refund Exposure by CLV and Churn Risk", **LAYOUT_BASE)
+
+    disc = d.groupby("discount_tier").agg(
+        avg_clv=("Customer_Lifetime_Value", "mean"),
+        avg_return=("return_refund_rate", "mean"),
+        customers=("Customer_Lifetime_Value", "count"),
+    ).reindex(DISCOUNT_ORDER).dropna(how="all").reset_index()
+    discount_fig = make_subplots(specs=[[{"secondary_y": True}]])
+    discount_fig.add_trace(go.Bar(
+        x=disc["discount_tier"], y=disc["avg_clv"],
+        name="Avg CLV", marker_color=BLUE,
+        text=disc["avg_clv"].round(0), texttemplate="₹%{text:,.0f}",
+    ), secondary_y=False)
+    discount_fig.add_trace(go.Scatter(
+        x=disc["discount_tier"], y=disc["avg_return"],
+        name="Avg Return Rate", mode="lines+markers",
+        marker=dict(size=10, color=RED), line=dict(color=RED, width=2),
+    ), secondary_y=True)
+    discount_fig.update_layout(title="Discount Sensitivity Economics", **LAYOUT_BASE)
+    discount_fig.update_yaxes(title_text="Avg CLV (₹)", gridcolor=GRID, secondary_y=False)
+    discount_fig.update_yaxes(title_text="Avg Return Rate", secondary_y=True)
+
+    breadth = d.groupby("product_breadth").agg(
+        avg_clv=("Customer_Lifetime_Value", "mean"),
+        avg_frequency=("purchase_frequency", "mean"),
+        avg_churn=("churn_probability", "mean"),
+        customers=("Customer_Lifetime_Value", "count"),
+    ).reindex(BREADTH_ORDER).dropna(how="all").reset_index()
+    breadth_fig = px.scatter(
+        breadth, x="avg_frequency", y="avg_clv", size="customers",
+        color="avg_churn", text="product_breadth",
+        color_continuous_scale=["#34a853", "#fbbc04", "#ea4335"],
+        labels={"avg_frequency": "Avg Purchase Frequency",
+                "avg_clv": "Avg CLV (₹)", "avg_churn": "Avg Churn Probability"},
+        size_max=55,
+    )
+    breadth_fig.update_traces(textposition="top center")
+    breadth_fig.update_layout(title="Product Breadth as Loyalty Proxy", **LAYOUT_BASE)
+
+    lens_labels = {
+        "recency_tier": RECENCY_ORDER,
+        "discount_tier": DISCOUNT_ORDER,
+        "product_breadth": BREADTH_ORDER,
+        "revenue_band": REVENUE_ORDER,
+    }
+    lens_agg = d.groupby(lens).agg(
+        customers=("Customer_Lifetime_Value", "count"),
+        avg_churn=("churn_probability", "mean"),
+    )
+    if lens in lens_labels:
+        lens_agg = lens_agg.reindex(lens_labels[lens]).dropna(how="all")
+    else:
+        lens_agg = lens_agg.join(
+            d.groupby(lens)["Customer_Lifetime_Value"].mean().rename("avg_clv")
+        ).sort_values("avg_clv", ascending=False).drop(columns=["avg_clv"])
+    lens_agg = lens_agg.reset_index()
+
+    lens_fig = make_subplots(specs=[[{"secondary_y": True}]])
+    lens_fig.add_trace(go.Bar(
+        x=lens_agg[lens], y=lens_agg["customers"],
+        name="Customers", marker_color=CYAN,
+        text=lens_agg["customers"], texttemplate="%{text:,}",
+    ), secondary_y=False)
+    lens_fig.add_trace(go.Scatter(
+        x=lens_agg[lens], y=lens_agg["avg_churn"],
+        name="Avg Churn", mode="lines+markers",
+        marker=dict(size=9, color=YELLOW), line=dict(color=YELLOW, width=2),
+    ), secondary_y=True)
+    lens_fig.update_layout(title=f"{lens.replace('_', ' ').title()} Lens", **LAYOUT_BASE)
+    lens_fig.update_yaxes(title_text="Customers", gridcolor=GRID, secondary_y=False)
+    lens_fig.update_yaxes(title_text="Avg Churn Probability", secondary_y=True)
+
+    pipeline = go.Figure(go.Funnel(
+        y=[
+            "CSV Ingest",
+            "Clean + Impute",
+            "Feature Engineering",
+            "Business Aggregations",
+            "Interactive Dashboard",
+        ],
+        x=[len(raw_df), len(df), len(df), len(d), len(d)],
+        marker=dict(color=[BLUE, GREEN, YELLOW, PURPLE, CYAN]),
+        textinfo="value+percent initial",
+        hovertemplate="%{y}<br>Rows: %{x:,}<extra></extra>",
+    ))
+    pipeline.update_layout(title="Notebook-to-Dashboard Pipeline Throughput", **LAYOUT_BASE)
+
+    return kpis, rfm_heat, return_heat, discount_fig, breadth_fig, lens_fig, pipeline
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 #  CALLBACKS — Data Explorer
 # ═════════════════════════════════════════════════════════════════════════════
-@dash_app.callback(
+@app.callback(
     Output("exp-count", "children"),
     Output("exp-table", "children"),
     Input("exp-clv", "value"),
@@ -1288,7 +1773,9 @@ def cb_explorer(clv_seg, churn_seg, band, region):
         "total_revenue_generated", "purchase_frequency",
         "average_order_value", "engagement_score_normalized",
         "acquisition_channel", "location_region", "income_level",
-        "customer_satisfaction_score", "priority_score",
+        "recency_tier", "discount_tier", "product_breadth",
+        "expected_clv_at_risk", "est_refund_revenue_at_risk",
+        "customer_satisfaction_score", "retention_urgency_score", "priority_score",
     ]
     display_cols = [c for c in display_cols if c in d.columns]
     d_show = d[display_cols].round(3).head(500)
@@ -1316,67 +1803,11 @@ def cb_explorer(clv_seg, churn_seg, band, region):
 
 
 # ── Entry Point ───────────────────────────────────────────────────────────────
-def get_app_port(default_port: int = 8050) -> int:
-    for key in ("PORT", "SERVER_PORT", "STREAMLIT_SERVER_PORT", "DYNO_PORT"):
-        value = os.environ.get(key)
-        if value:
-            try:
-                return int(value)
-            except ValueError:
-                continue
-    return default_port
-
-
-import socket
-import threading
-import time
-
-import streamlit as st
-from streamlit.components.v1 import iframe
-
-
-def is_port_free(host: str, port: int) -> bool:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        return sock.connect_ex((host, port)) != 0
-
-
-def find_free_port(start_port: int = 8050, host: str = "127.0.0.1") -> int:
-    port = start_port
-    while port < 9000:
-        if is_port_free(host, port):
-            return port
-        port += 1
-    raise RuntimeError("No free port found for Dash server")
-
-
-def run_dash_server() -> int:
-    host = "127.0.0.1"
-    default_port = int(os.environ.get("DASH_PORT", 8050))
-    port = default_port if is_port_free(host, default_port) else find_free_port(default_port, host)
-
-    thread = threading.Thread(
-        target=dash_app.run,
-        kwargs={"host": host, "port": port, "debug": False},
-        daemon=True,
-    )
-    thread.start()
-    return port
-
-
-def render_streamlit() -> None:
-    st.set_page_config(page_title="CLV Intelligence Dashboard", layout="wide")
-    st.title("CLV Intelligence Dashboard")
-    st.write("Your Dash dashboard is embedded below. If the dashboard does not appear, refresh the page.")
-
-    try:
-        if "dash_port" not in st.session_state:
-            st.session_state.dash_port = run_dash_server()
-            time.sleep(1.0)
-        dash_url = f"http://127.0.0.1:{st.session_state.dash_port}"
-        iframe(dash_url, height=900, scrolling=True)
-    except Exception as err:
-        st.error("Unable to start the Dash server inside Streamlit.")
-        st.exception(err)
-
-
-render_streamlit()
+if __name__ == "__main__":
+    host = os.environ.get("HOST", "0.0.0.0")
+    port = int(os.environ.get("PORT", "8050"))
+    print("=" * 60)
+    print("  CLV Business Intelligence Dashboard")
+    print(f"  Open: http://localhost:{port}")
+    print("=" * 60)
+    app.run(debug=False, host=host, port=port)
