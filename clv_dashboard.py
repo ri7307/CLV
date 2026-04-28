@@ -43,13 +43,30 @@ MUTED    = "#94a3b8"
 ACCENT   = "#93c5fd"
 PALETTE  = [BLUE, GREEN, YELLOW, RED, PURPLE, CYAN]
 GRID     = "#1e3a5f"
+INTERACTIVE_GRAPH_CONFIG = {
+    "displaylogo": False,
+    "responsive": True,
+    "scrollZoom": True,
+    "modeBarButtonsToRemove": ["lasso2d", "select2d"],
+}
 
 LAYOUT_BASE = dict(
     plot_bgcolor=BG,
     paper_bgcolor=SURFACE,
     font=dict(color=FONT, family="DM Sans, Inter, sans-serif"),
     title_font=dict(size=16, color=ACCENT, family="DM Sans, Inter, sans-serif"),
-    legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color=FONT)),
+    legend=dict(
+        bgcolor="rgba(0,0,0,0)",
+        font=dict(color=FONT),
+        orientation="h",
+        yanchor="bottom",
+        y=1.02,
+        xanchor="right",
+        x=1,
+    ),
+    hoverlabel=dict(bgcolor="#0b1220", bordercolor="#334155",
+                    font=dict(color=FONT)),
+    transition=dict(duration=350),
     margin=dict(l=55, r=30, t=75, b=55),
     xaxis=dict(gridcolor=GRID, zerolinecolor=GRID),
     yaxis=dict(gridcolor=GRID, zerolinecolor=GRID),
@@ -1253,6 +1270,9 @@ def cb_channel(clv_seg, churn_seg):
     d = df.copy()
     if clv_seg   != "All": d = d[d["clv_segment"] == clv_seg]
     if churn_seg != "All": d = d[d["churn_risk"]   == churn_seg]
+    if d.empty:
+        empty = empty_figure()
+        return empty, empty, empty
 
     ch_agg = d.groupby("acquisition_channel")["Customer_Lifetime_Value"].mean().sort_values()
     bar = go.Figure(go.Bar(
@@ -1261,6 +1281,22 @@ def cb_channel(clv_seg, churn_seg):
         text=ch_agg.values.round(0), texttemplate="₹%{text:,.0f}", textposition="outside",
     ))
     bar.update_layout(title="Avg CLV by Channel", **LAYOUT_BASE)
+    bar.update_traces(
+        textfont=dict(color=FONT, size=12),
+        cliponaxis=False,
+        hovertemplate="<b>%{y}</b><br>Avg CLV: â‚¹%{x:,.0f}<extra></extra>",
+    )
+    bar.update_layout(
+        margin=dict(l=135, r=130, t=70, b=55),
+        xaxis=dict(
+            gridcolor=GRID,
+            title="Average CLV (â‚¹)",
+            range=[0, float(ch_agg.max()) * 1.24],
+        ),
+        yaxis=dict(gridcolor=GRID, title="", automargin=True),
+        uniformtext_minsize=11,
+        uniformtext_mode="show",
+    )
 
     # Stacked bar: revenue band per channel
     stk = d.groupby(["acquisition_channel", "revenue_band"]).size().unstack(fill_value=0)
