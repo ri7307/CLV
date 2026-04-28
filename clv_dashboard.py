@@ -394,6 +394,7 @@ NAV_ITEMS = [
     ("☁️", "Big Data Risk Lab",        "/risk-lab"),
     ("📋", "Data Explorer",            "/explorer"),
 ]
+NAV_ITEMS = [item for item in NAV_ITEMS if item[2] != "/risk-lab"]
 
 
 def sidebar():
@@ -1166,6 +1167,7 @@ def render_page(path):
         "/risk-lab":    page_risk_lab,
         "/explorer":   page_explorer,
     }
+    routes.pop("/risk-lab", None)
     fn = routes.get(path, page_overview)
     return fn()
 

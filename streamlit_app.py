@@ -847,19 +847,18 @@ def render_app():
     )
 
     st.sidebar.title("CLV Intel")
-    page = st.sidebar.radio(
-        "Dashboard page",
-        [
-            "Executive Overview",
-            "Channel & Revenue Intel",
-            "Churn & Retention",
-            "Product & Category",
-            "Regional & Demographics",
-            "Engagement & Loyalty",
-            "Big Data Risk Lab",
-            "Data Explorer",
-        ],
-    )
+    page_options = [
+        "Executive Overview",
+        "Channel & Revenue Intel",
+        "Churn & Retention",
+        "Product & Category",
+        "Regional & Demographics",
+        "Engagement & Loyalty",
+        "Big Data Risk Lab",
+        "Data Explorer",
+    ]
+    page_options = [page for page in page_options if page != "Big Data Risk Lab"]
+    page = st.sidebar.radio("Dashboard page", page_options)
 
     if page == "Executive Overview":
         _overview_page()
@@ -873,8 +872,6 @@ def render_app():
         _regional_page()
     elif page == "Engagement & Loyalty":
         _engagement_page()
-    elif page == "Big Data Risk Lab":
-        _risk_lab_page()
     else:
         _explorer_page()
 
