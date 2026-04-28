@@ -31,6 +31,18 @@ PLOTLY_CONFIG = getattr(
 
 def _theme(fig):
     fig.update_layout(**dash_app.LAYOUT_BASE)
+    fig.update_layout(
+        title=dict(font=dict(size=14), x=0.02, xanchor="left", y=0.98, yanchor="top"),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.01,
+            xanchor="right",
+            x=1,
+            font=dict(size=11),
+        ),
+        margin=dict(t=118, b=62, l=60, r=34),
+    )
     return fig
 
 
@@ -68,6 +80,7 @@ def _insight_box(lines, accent=None):
 
 
 def _render_chart(fig, insights, accent=None):
+    _theme(fig)
     st.plotly_chart(fig, use_container_width=True, config=PLOTLY_CONFIG)
     _insight_box(insights, accent=accent)
 
@@ -789,6 +802,36 @@ def render_app():
             border-radius: 8px;
             padding: 12px 14px;
             box-shadow: 0 10px 24px rgba(15, 23, 42, 0.18);
+            min-height: 132px;
+        }}
+        div[data-testid="stMetricLabel"] {{
+            font-size: 0.94rem;
+        }}
+        div[data-testid="stMetricLabel"] > div {{
+            white-space: normal;
+            overflow-wrap: anywhere;
+            line-height: 1.3;
+        }}
+        div[data-testid="stMetricValue"] {{
+            font-size: clamp(1.7rem, 1.15vw + 1rem, 2.45rem);
+            line-height: 1.08;
+        }}
+        div[data-testid="stMetricValue"] > div {{
+            white-space: normal;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+        }}
+        div[data-testid="stMetricDelta"] {{
+            font-size: 0.88rem;
+            line-height: 1.2;
+        }}
+        label[data-baseweb="select"] + div,
+        div[data-baseweb="select"] {{
+            font-size: 1rem;
+        }}
+        [data-testid="stPlotlyChart"] {{
+            padding-top: 4px;
+            margin-bottom: 2px;
         }}
         .page-banner {{
             background: linear-gradient(135deg, #10213a 0%, #13273c 58%, #123333 100%);
