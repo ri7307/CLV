@@ -90,6 +90,47 @@ def _overview_page():
     st.plotly_chart(scatter, use_container_width=True)
 
 
+def _channel_page():
+    st.title("Channel & Revenue Intel")
+    c1, c2 = st.columns(2)
+    clv = c1.selectbox(
+        "CLV Segment", ["All", "High Value", "Medium Value", "Low Value"],
+        key="channel_clv",
+    )
+    churn = c2.selectbox(
+        "Churn Risk", ["All", "High Risk", "Medium Risk", "Low Risk"],
+        key="channel_churn",
+    )
+    d = dash_app.filter_dataset(dash_app.df, clv=clv, churn=churn)
+    if d.empty:
+        st.warning("No data for the selected filters.")
+        return
+
+    channel_agg = d.groupby("acquisition_channel").agg(
+        avg_clv=("Customer_Lifetime_Value", "mean"),
+        avg_revenue=("total_revenue_generated", "mean"),
+        avg_churn=("churn_probability", "mean"),
+        customers=("Customer_Lifetime_Value", "count"),
+    )
+    top_clv = channel_agg["avg_clv"].idxmax()
+    top_revenue = channel_agg["avg_revenue"].idxmax()
+    lowest_churn = channel_agg["avg_churn"].idxmin()
+    largest = channel_agg["customers"].idxmax()
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Best CLV Channel", top_clv, f"₹{channel_agg.loc[top_clv, 'avg_clv']:,.0f}")
+    m2.metric("Revenue Leader", top_revenue,
+              f"₹{channel_agg.loc[top_revenue, 'avg_revenue']:,.0f}")
+    m3.metric("Lowest Churn", lowest_churn, f"{channel_agg.loc[lowest_churn, 'avg_churn']:.1%}")
+    m4.metric("Largest Channel", largest, f"{channel_agg.loc[largest, 'customers']:,.0f}")
+
+    bar, stacked, bubble = dash_app.cb_channel(clv, churn)
+    c3, c4 = st.columns(2)
+    c3.plotly_chart(bar, use_container_width=True)
+    c4.plotly_chart(stacked, use_container_width=True)
+    st.plotly_chart(bubble, use_container_width=True)
+
+
 def _product_page():
     st.title("Product & Category Insights")
     income = st.selectbox("Income Level", ["All", "High", "Medium", "Low"])
@@ -137,6 +178,60 @@ def _churn_page():
         .head(top_n).round(3),
         use_container_width=True,
     )
+
+
+def _regional_page():
+    st.title("Regional & Demographic Analysis")
+    region_agg = dash_app.df.groupby("location_region").agg(
+        avg_clv=("Customer_Lifetime_Value", "mean"),
+        avg_churn=("churn_probability", "mean"),
+        avg_satisfaction=("customer_satisfaction_score", "mean"),
+        customers=("Customer_Lifetime_Value", "count"),
+    )
+    top_region = region_agg["avg_clv"].idxmax()
+    stable_region = region_agg["avg_churn"].idxmin()
+    happy_region = region_agg["avg_satisfaction"].idxmax()
+    largest_region = region_agg["customers"].idxmax()
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Top CLV Region", top_region, f"₹{region_agg.loc[top_region, 'avg_clv']:,.0f}")
+    m2.metric("Lowest Churn Region", stable_region,
+              f"{region_agg.loc[stable_region, 'avg_churn']:.1%}")
+    m3.metric("Highest Satisfaction", happy_region,
+              f"{region_agg.loc[happy_region, 'avg_satisfaction']:.2f}")
+    m4.metric("Largest Region", largest_region,
+              f"{region_agg.loc[largest_region, 'customers']:,.0f}")
+
+    dual, box, gender, satisfaction = dash_app.cb_regional("/regional")
+    c1, c2 = st.columns(2)
+    c1.plotly_chart(dual, use_container_width=True)
+    c2.plotly_chart(box, use_container_width=True)
+    c3, c4 = st.columns(2)
+    c3.plotly_chart(gender, use_container_width=True)
+    c4.plotly_chart(satisfaction, use_container_width=True)
+
+
+def _engagement_page():
+    st.title("Engagement & Loyalty Analysis")
+    loyalty = dash_app.df.groupby("loyalty_label")["Customer_Lifetime_Value"].mean()
+    member_clv = loyalty.get("Member", 0)
+    non_member_clv = loyalty.get("Non-Member", 0)
+    lift = member_clv - non_member_clv
+    member_share = dash_app.df["loyalty_label"].eq("Member").mean()
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Avg Engagement", f"{dash_app.df['engagement_score_normalized'].mean():.1f}/100")
+    m2.metric("Loyalty CLV Lift", f"₹{lift:,.0f}")
+    m3.metric("Member Share", f"{member_share:.1%}")
+    m4.metric("Avg Support Tickets", f"{dash_app.df['customer_support_tickets'].mean():.2f}")
+
+    hist, scatter, loyalty_fig, support_fig = dash_app.cb_engagement("/engagement")
+    c1, c2 = st.columns(2)
+    c1.plotly_chart(hist, use_container_width=True)
+    c2.plotly_chart(scatter, use_container_width=True)
+    c3, c4 = st.columns(2)
+    c3.plotly_chart(loyalty_fig, use_container_width=True)
+    c4.plotly_chart(support_fig, use_container_width=True)
 
 
 def _risk_lab_page():
@@ -209,16 +304,23 @@ def render_app():
     st.sidebar.title("CLV Intel")
     page = st.sidebar.radio(
         "Dashboard page",
-        ["Executive Overview", "Product & Category", "Churn & Retention",
+        ["Executive Overview", "Channel & Revenue Intel", "Churn & Retention",
+         "Product & Category", "Regional & Demographics", "Engagement & Loyalty",
          "Big Data Risk Lab", "Data Explorer"],
     )
 
     if page == "Executive Overview":
         _overview_page()
+    elif page == "Channel & Revenue Intel":
+        _channel_page()
     elif page == "Product & Category":
         _product_page()
     elif page == "Churn & Retention":
         _churn_page()
+    elif page == "Regional & Demographics":
+        _regional_page()
+    elif page == "Engagement & Loyalty":
+        _engagement_page()
     elif page == "Big Data Risk Lab":
         _risk_lab_page()
     else:
